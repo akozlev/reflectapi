@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- TypeScript codegen with `--typecheck` now works under TypeScript 6 and 7. Those versions reject positional file arguments when a `tsconfig.json` is discoverable from the working directory (`error TS5112`), which broke codegen for any consumer running it from inside a project. The generated files are now typechecked with `--ignoreConfig`; if the resolved `tsc` does not recognise that option (`error TS5023`, i.e. TypeScript 5 or older) the typecheck is retried without it.
 - **Security:** instrumented Rust clients (`--instrument`) no longer record request bodies and headers as tracing span fields. The generated `#[tracing::instrument]` attribute now uses `skip_all`, so credentials in request payloads (passwords, tokens) can no longer reach logs in cleartext via their `Debug` output. Spans are still named after the endpoint path. Regenerate clients to pick this up.
 
 ## 0.17.6

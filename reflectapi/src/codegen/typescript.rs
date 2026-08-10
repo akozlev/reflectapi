@@ -177,32 +177,32 @@ fn typecheck(main: &str, transport: &str) -> anyhow::Result<()> {
     let transport_path = dir.join("generated.transport.ts");
     std::fs::write(&main_path, main)?;
     std::fs::write(&transport_path, transport)?;
+    let files = [main_path, transport_path];
 
-    for cmd in [
-        &mut Command::new("tsc"),
-        Command::new("npx")
-            .arg("-y")
-            .arg("-p")
-            .arg("typescript")
-            .arg("tsc"),
-    ] {
-        let child = match cmd
-            .arg("--noEmit")
-            .arg("--skipLibCheck")
-            .arg("--strict")
-            .args(["--lib", "esnext,DOM"])
-            .arg(&main_path)
-            .arg(&transport_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
+    // In descending order of speed. Each entry is a program plus the args that
+    // get it to a `tsc` invocation.
+    let candidates: [(&str, &[&str]); 2] =
+        [("tsc", &[]), ("npx", &["-y", "-p", "typescript", "tsc"])];
+
+    for (program, prefix) in candidates {
+        // TypeScript >=6 makes it a hard error (TS5112) to pass files
+        // positionally while a tsconfig.json is discoverable from the cwd —
+        // which it usually is, since codegen runs from inside the consumer's
+        // project. `--ignoreConfig` opts out of loading it.
+        let mut output = match run_tsc(program, prefix, &["--ignoreConfig"], &files)? {
+            Some(output) => output,
+            // Program is not installed, try the next candidate.
+            None => continue,
         };
 
-        let output = child.wait_with_output()?;
+        // TS5 has no `--ignoreConfig` and rejects it outright. It also predates
+        // TS5112, so it needs no opt-out: retry with the pre-6 flag set.
+        if !output.status.success() && rejects_ignore_config(&output) {
+            match run_tsc(program, prefix, &[], &files)? {
+                Some(retried) => output = retried,
+                None => continue,
+            }
+        }
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
@@ -221,6 +221,44 @@ fn typecheck(main: &str, transport: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Typecheck `files` with the `tsc` reachable via `program` + `prefix`, passing
+/// `extra_args` ahead of the fixed flag set.
+///
+/// Returns `Ok(None)` when the program is not installed, so callers can move on
+/// to the next candidate.
+fn run_tsc(
+    program: &str,
+    prefix: &[&str],
+    extra_args: &[&str],
+    files: &[std::path::PathBuf],
+) -> anyhow::Result<Option<std::process::Output>> {
+    let child = match Command::new(program)
+        .args(prefix)
+        .args(extra_args)
+        .arg("--noEmit")
+        .arg("--skipLibCheck")
+        .arg("--strict")
+        .args(["--lib", "esnext,DOM"])
+        .args(files)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    Ok(Some(child.wait_with_output()?))
+}
+
+/// Whether `tsc` bailed out because it does not know `--ignoreConfig` (TS5023),
+/// as opposed to finding a genuine type error.
+fn rejects_ignore_config(output: &std::process::Output) -> bool {
+    // tsc reports diagnostics on stdout.
+    String::from_utf8_lossy(&output.stdout).contains("error TS5023")
 }
 
 mod templates {
